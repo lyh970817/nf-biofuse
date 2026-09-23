@@ -1,0 +1,20 @@
+name: nf-core-gwas-biofuse
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.12
+  - pyfuse3=3.4.1
+  # The library the BioFuse daemon loads is this one, never the host's. fuse-3.18.3 (2026-09-08) is the
+  # first release whose fallback FUSE_STATX handler replies (ENOSYS) instead of leaving the request
+  # unanswered; on earlier builds without HAVE_STATX a plain `stat` of a mounted file wedges the mount
+  # and every reader of it (lyh970817/gwas#19). The floor is the fix, so keep it explicit.
+  - libfuse3>=3.18.3
+  - pip
+  - pip:
+      - biofuse==0.1.0
+      - vcztools==0.2.0
+      - bio2zarr==0.2.1
+      - zarr==3.4.0
+      - numcodecs==0.17.0
+      - -e .
