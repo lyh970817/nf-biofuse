@@ -1,0 +1,2 @@
+cohort_id,genome_build,ancestry,pgen,psam,pvar,bed,bim,fam,genotype_view_id
+cohort_a,GRCh38,EUR,,,,{bed},{bim},{fam},{view_id}
