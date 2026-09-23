@@ -7,8 +7,12 @@
  */
 
 params.manifest = "${projectDir}/example/manifest.csv"
+// Test hooks for the local FUSE tier's lifecycle matrix: hold the task, fail it, stream the .bed slowly,
+// and touch a marker file once the trio has been read.
 params.sleep = 0
 params.fail = false
+params.stream = false
+params.marker = null
 
 process READ_TRIO {
     input:
@@ -22,6 +26,8 @@ process READ_TRIO {
     printf '%s bed magic: ' ${id}
     head -c 3 ${bed} | od -An -tx1 | tr -d ' \\n'
     printf ', variants: %s, samples: %s\\n' "\$(wc -l < ${bim})" "\$(wc -l < ${fam})"
+    ${params.marker ? "touch '${params.marker}'" : ''}
+    ${params.stream ? "timeout 60 cat ${bed} | (sleep 30; cat > /dev/null)" : ''}
     sleep ${params.sleep}
     ${params.fail ? 'exit 42' : ''}
     """

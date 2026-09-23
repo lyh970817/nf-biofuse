@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Written by the nf-core/gwas team and released under the MIT license.
+# SPDX-License-Identifier: Apache-2.0
 #
-# Compare a pipeline run through a BioFuse view with a control run on the fixture trio. Each argument is
-# a run directory holding out/ (the --outdir) and trace.txt (the -with-trace file); a launcher run also
-# holds <cohort_id>.biofuse_view.json.
+# Compare an nf-core/gwas run through a BioFuse view with a control run on the fixture trio. Each argument
+# is a run directory holding out/ (the --outdir) and trace.txt (the -with-trace file); a plugin run also
+# holds <basename>.biofuse_view.json, the view record.
 #
 #   - every REGENIE .regenie.gz is byte-identical;
 #   - every GWASLab harmonised .gwaslab.tsv.gz is identical once decompressed (gzip stamps its header);
 #   - digest mode: genotype_view.json is byte-identical, since the pipeline digested the same bytes under
 #     the same member names;
-#     declared mode: genotype_view.json records the identity the launcher declared, biofuse:<64 hex>, and
+#     declared mode: genotype_view.json records the identity the plugin declared, biofuse:<64 hex>, and
 #     no members, because the pipeline never opened the trio;
 #   - every task completed, and the run executed the control's tasks, less PREPARE_GENOTYPE_SOURCE in
 #     declared mode, which is the one task a declared identity skips.
@@ -47,7 +47,7 @@ same_set() { # $1 = pattern, $2 = what
     [ -n "$left" ] && [ "$left" = "$right" ]
 }
 
-declared_identity() { # $1 = candidate genotype_view.json, $2 = the launcher's record
+declared_identity() { # $1 = candidate genotype_view.json, $2 = the plugin's view record
     python3 - "$1" "$2" <<'PY'
 import json
 import re
@@ -86,7 +86,7 @@ if same_set '*.genotype_view.json' 'genotype view records'; then
             check "byte-identical ${relative#./}" $?
         else
             declared_identity "$candidate/out/$relative" "$(find "$candidate" -maxdepth 1 -name '*.biofuse_view.json' | head -n 1)"
-            check "${relative#./} records the launcher's declared biofuse identity" $?
+            check "${relative#./} records the plugin's declared biofuse identity" $?
         fi
     done
 fi

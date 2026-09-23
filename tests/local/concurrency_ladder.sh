@@ -1,41 +1,27 @@
 #!/usr/bin/env bash
-# Written by the nf-core/gwas team and released under the MIT license.
+# SPDX-License-Identifier: Apache-2.0
 #
-# Concurrency ladder: N = 1, 2, 4, 8 concurrent Apptainer `plink2 --freq` consumers of ONE mount, which is
-# how a pipeline's parallel tasks read a view. Each level runs under its own launcher invocation, so a
-# bad level cannot poison the next, and passes when:
-#   - every consumer exits 0 within CONSUMER_TIMEOUT (a consumer stuck on a wedged mount would not);
+# Concurrency ladder: N = 1, 2, 4, 8 concurrent Apptainer `plink2 --freq` tasks reading ONE mount, which
+# is how a pipeline's parallel tasks read a view. Each level is its own Nextflow run of the consumer
+# pipeline with the plugin, so each gets a fresh mount and a bad level cannot poison the next. A level
+# passes when:
+#   - the run exits 0 within CONSUMER_TIMEOUT (a task stuck on a wedged mount would hold it);
 #   - every .afreq is identical to plink2 --freq on the fixture trio itself;
-#   - the launcher exits 0 and leaves no mount, no daemon or watchdog and no wedged connection behind.
+#   - the run leaves no mount, no supervisor, daemon or watchdog and no wedged connection behind.
 # A wedged connection is aborted through /sys/fs/fuse/connections rather than by killing its readers.
 #
-# Usage: GWAS_TEST_FIXTURES=... [VCZ=store.vcz] [LOCAL_TIER_ROOT=DIR] [LEVELS="1 2 4 8"]
-#        [CONSUMER_TIMEOUT=180] concurrency_ladder.sh
+# Usage: GWAS_TEST_FIXTURES=... GWAS_PIPELINE=... [VCZ=store.vcz] [LOCAL_TIER_ROOT=DIR] [LEVELS="1 2 4 8"]
+#        [CONSUMER_TIMEOUT=300] concurrency_ladder.sh
 set -u
 # shellcheck source=local_tier_lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/local_tier_lib.sh"
 
 LEVELS=${LEVELS:-"1 2 4 8"}
-CONSUMER_TIMEOUT=${CONSUMER_TIMEOUT:-180}
-
-# ---- Inside the launched command: N concurrent consumers of the mount ----
-if [ "${1:-}" = "--inside" ]; then
-    n=$2 image=$3 out=$4
-    pids=()
-    for i in $(seq 1 "$n"); do
-        (
-            READ_TIMEOUT=$CONSUMER_TIMEOUT plink2_in_image "$image" "$BIOFUSE_MOUNT" "$out" -- \
-                --bfile "$BIOFUSE_MOUNT/$BIOFUSE_BASENAME" --freq --out "$out/c_$i" >"$out/c_$i.stdout" 2>&1
-            echo "$?" >"$out/c_$i.rc"
-        ) &
-        pids+=($!)
-    done
-    for pid in "${pids[@]}"; do wait "$pid"; done
-    exit 0
-fi
+CONSUMER_TIMEOUT=${CONSUMER_TIMEOUT:-300}
 
 require_fuse_host
 require_store_tools
+[ -n "${PLINK2_SIF:-}" ] || require_pipeline
 work=$(work_dir ladder)
 ensure_vcz "$work/store"
 image=$(plink2_image "$work/images")
@@ -43,42 +29,63 @@ state_root="$work/state"
 mkdir -p "$state_root" "$work/reference"
 baseline=$(fuse_connections)
 fixture=$(fixture_genotypes)
+printf 'id,bed,bim,fam\ncohort,{bed},{bim},{fam}\n' >"$work/manifest.template.csv"
 
 plink2_in_image "$image" "$fixture" "$work/reference" -- \
-    --bfile "$fixture/$BASENAME" --freq --out "$work/reference/fixture" >"$work/reference/fixture.stdout" 2>&1 ||
+    --bfile "$fixture/example_all" --freq --out "$work/reference/fixture" >"$work/reference/fixture.stdout" 2>&1 ||
     fail "plink2 --freq on the fixture trio failed; see $work/reference/fixture.stdout"
 reference="$work/reference/fixture.afreq"
 
-echo "store: $VCZ   consumer timeout: ${CONSUMER_TIMEOUT}s   reference: $(sha256sum "$reference" | cut -c1-16)"
+# The largest number of tasks whose [start, complete] intervals overlap, from the trace.
+max_overlap() { # $1 = trace file
+    python3 - "$1" <<'PY' 2>/dev/null
+import csv
+import sys
+from datetime import datetime
+
+events = []
+for row in csv.DictReader(open(sys.argv[1]), delimiter="\t"):
+    parse = lambda value: datetime.strptime(value, "%Y-%m-%d %H:%M:%S.%f")
+    events += [(parse(row["start"]), 1), (parse(row["complete"]), -1)]
+running = peak = 0
+for _, step in sorted(events, key=lambda event: (event[0], event[1])):
+    running += step
+    peak = max(peak, running)
+print(peak)
+PY
+}
+
+echo "store: $VCZ   run timeout: ${CONSUMER_TIMEOUT}s   reference: $(sha256sum "$reference" | cut -c1-16)"
 failed=0
 for n in $LEVELS; do
-    out="$work/n$n"
-    rm -rf "$out"
-    mkdir -p "$out"
+    run="$work/n$n"
+    rm -rf "$run"
+    mkdir -p "$run"
+    write_plugin_config "$run/biofuse.config" "$state_root" "$run/cohort.biofuse.csv" "$work/manifest.template.csv" declared ""
     started=$(date +%s)
-    # The outer deadline outlives every consumer's; the launcher tears down on the TERM it sends.
-    launcher_argv "$state_root" "$out" declared
-    timeout --kill-after=60 $((CONSUMER_TIMEOUT + 120)) "${LAUNCH[@]}" \
-        env CONSUMER_TIMEOUT="$CONSUMER_TIMEOUT" bash "${BASH_SOURCE[0]}" --inside "$n" "$image" "$out" \
-        >"$out/launcher.log" 2>&1
+    # The outer deadline sends SIGTERM, on which Nextflow aborts and the plugin tears the mount down.
+    (cd "$run" && timeout --kill-after=60 "$CONSUMER_TIMEOUT" nextflow -log "$run/nextflow.log" run "$TESTS_DIR/consumer" \
+        -c "$run/biofuse.config" --manifest "$run/cohort.biofuse.csv" --mode ladder --consumers "$n" \
+        --plink2_image "$image" --outdir "$run/out" -work-dir "$run/work" -with-trace "$run/trace.txt" \
+        -ansi-log false) >"$run/stdout" 2>&1
     rc=$?
     elapsed=$(($(date +%s) - started))
     identical=0 bad=0
     for i in $(seq 1 "$n"); do
-        consumer_rc=$(cat "$out/c_$i.rc" 2>/dev/null)
-        if [ "$consumer_rc" = 0 ] && cmp -s "$out/c_$i.afreq" "$reference"; then
+        if cmp -s "$run/out/c_$i.afreq" "$reference"; then
             identical=$((identical + 1))
         else
             bad=$((bad + 1))
-            echo "    consumer $i: rc=${consumer_rc:-none}$([ "$consumer_rc" = 124 ] && echo ' (timed out)')"
-            tail -n 2 "$out/c_$i.stdout" 2>/dev/null | sed 's/^/        /'
+            echo "    consumer $i: no identical .afreq"
         fi
     done
-    printf '  N=%-2s launcher rc=%s  %3ss  identical .afreq %s/%s\n' "$n" "$rc" "$elapsed" "$identical" "$n"
+    peak=$(max_overlap "$run/trace.txt")
+    printf '  N=%-2s nextflow rc=%s  %3ss  identical .afreq %s/%s  (at most %s tasks running at once)\n' \
+        "$n" "$rc" "$elapsed" "$identical" "$n" "${peak:-?}"
     if [ "$rc" -eq 0 ] && [ "$bad" -eq 0 ] && assert_released "$baseline" "$state_root" "N=$n"; then
         echo "  N=$n PASS"
     else
-        echo "  N=$n FAIL; stopping the ladder (launcher log $out/launcher.log)"
+        echo "  N=$n FAIL; stopping the ladder (run under $run)"
         failed=1
         break
     fi
