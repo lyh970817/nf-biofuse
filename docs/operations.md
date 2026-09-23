@@ -17,9 +17,11 @@ and too short for the consumers. The plugin mounts the view from the host for th
 1. **`onFlowCreate`.** Nextflow calls a plugin's trace observers from `Session.start()`, on the main thread,
    before it parses the pipeline script. The plugin starts `nf-biofuse-supervisor serve` there and blocks until
    the supervisor reports the view ready, so no workflow code, parameter validation included, runs before the
-   manifest and the trio exist. Measured on nf-core/gwas (Nextflow 26.04.6): the hook fires about 7 s before
-   `ScriptRunner` launches the script and 8.5 s before nf-schema starts validating parameters, and a hook that
-   blocks for 15 s delays validation by 15 s.
+   manifest and the trio exist. Measured on nf-core/gwas `-profile test,apptainer` with Nextflow 26.04.6: the
+   hook starts 10 ms after `Session start` and returns with the view ready 1.2 s later; Nextflow then compiles
+   the pipeline script for 6.1 s, launches it, and nf-schema starts validating parameters 0.8 s after that and
+   reads the plugin's cohort manifest 0.15 s later. A hook made to block for 15 s delayed validation by the same
+   15 s.
 2. **The supervisor** computes the view identity (digesting the store unless a revision is declared), takes
    ownership of the view, starts the BioFuse mount daemon and a SIGKILL watchdog, waits until a short read of
    every trio member succeeds, writes the view record and the manifest rendered from the template, and writes
