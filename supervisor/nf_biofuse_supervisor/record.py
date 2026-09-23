@@ -1,4 +1,4 @@
-# Written by the nf-core/gwas team and released under the MIT license.
+# SPDX-License-Identifier: Apache-2.0
 """The sidecar record: everything the identity was taken over, the identity itself, and everything that
 was deliberately left out of it but that a person reproducing the run will want to know."""
 
@@ -11,7 +11,9 @@ import os
 import platform
 import time
 
-RECORD_SCHEMA = "nf-core/gwas/biofuse-view-record/1"
+# Not the launcher's nf-core/gwas/biofuse-view-record/1: the record no longer names a cohort, which lives in
+# the manifest template, and it records the manifest it published instead.
+RECORD_SCHEMA = "nf-biofuse/view-record/1"
 RECORD_SUFFIX = ".biofuse_view.json"
 # What a PLINK 1 view of a VCF Zarr store cannot carry. The FAM's pedigree, sex and phenotype columns
 # and the BIM's genetic-map column are placeholders written by the encoder, not data.
@@ -58,7 +60,6 @@ def runtime_versions(daemon_pid: int) -> dict:
 
 def build_record(
     *,
-    cohort_id: str,
     preimage: dict,
     genotype_view_id: str,
     identity_mode: str,
@@ -66,12 +67,12 @@ def build_record(
     runtime: dict,
     mount_readiness_seconds: float,
     mount: dict,
+    manifest: dict,
 ) -> dict:
     """``genotype_view_id`` is the identity computed from ``preimage``; ``declared_genotype_view_id`` is
-    what the manifest declared to the pipeline, which is nothing in ``digest`` mode."""
+    what the manifest declared to the pipeline through ``{view_id}``, which is nothing in ``digest`` mode."""
     return {
         "schema": RECORD_SCHEMA,
-        "cohort_id": cohort_id,
         "genotype_view_id": genotype_view_id,
         "identity_mode": identity_mode,
         "declared_genotype_view_id": declared_genotype_view_id,
@@ -80,13 +81,14 @@ def build_record(
         "kernel": platform.release(),
         "mount_readiness_seconds": round(float(mount_readiness_seconds), 3),
         "mount": mount,
+        "manifest": manifest,
         "information_loss": list(INFORMATION_LOSS),
         "created": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     }
 
 
-def record_path(record_dir: str, cohort_id: str) -> str:
-    return os.path.join(record_dir, f"{cohort_id}{RECORD_SUFFIX}")
+def record_path(record_dir: str, basename: str) -> str:
+    return os.path.join(record_dir, f"{basename}{RECORD_SUFFIX}")
 
 
 def write_record(path: str, record: dict) -> None:

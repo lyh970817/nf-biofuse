@@ -6,3 +6,11 @@
 # Ignore Gradle build output directory
 build
 work
+
+# Written into the checkout by the editable install that supervisor/environment.yml performs
+*.egg-info/
+__pycache__/
+.pytest_cache/
+
+# The supervisor's log, written in the launch directory of a run
+.nf-biofuse.log

@@ -1,4 +1,4 @@
-# Written by the nf-core/gwas team and released under the MIT license.
+# SPDX-License-Identifier: Apache-2.0
 """View ownership, process liveness and stale reclaim, on views that were never mounted. The FUSE tier
 (``lifecycle_matrix.sh``) covers the same paths against a real mount."""
 
@@ -10,11 +10,11 @@ import time
 
 import pytest
 
-from nf_core_gwas_biofuse import mount
+from nf_biofuse_supervisor import mount
 
 HOLDER = """
 import os, sys, time
-from nf_core_gwas_biofuse import mount
+from nf_biofuse_supervisor import mount
 paths = mount.ViewPaths(sys.argv[1])
 lock = mount.try_lock(paths)
 os.makedirs(paths.view_dir, exist_ok=True)
@@ -62,15 +62,16 @@ def holder(paths):
 
 def test_state_layout(tmp_path):
     view = mount.ViewPaths.under(str(tmp_path), "0123456789abcdef")
-    assert view.view_dir == str(tmp_path / "nf-core-gwas-biofuse" / "view-0123456789abcdef")
+    assert view.view_dir == str(tmp_path / "nf-biofuse" / "view-0123456789abcdef")
     assert view.lock_file == view.view_dir + ".lock"
     assert [
         os.path.relpath(path, view.view_dir)
-        for path in (view.mount_dir, view.owner_pid_file, view.daemon_pid_file, view.daemon_log)
+        for path in (view.mount_dir, view.owner_pid_file, view.daemon_pid_file, view.published, view.daemon_log)
     ] == [
         "mnt",
         "owner.pid",
         "daemon.pid",
+        "published.json",
         os.path.join("logs", "daemon.log"),
     ]
 
@@ -154,7 +155,7 @@ def test_claim_creates_the_view_and_names_its_owner(paths):
         mount.release_lock(lock)
 
 
-def test_claim_reclaims_a_view_whose_launcher_is_gone(paths):
+def test_claim_reclaims_a_view_whose_supervisor_is_gone(paths):
     os.makedirs(paths.log_dir)
     os.makedirs(paths.mount_dir)
     for pid_file in (paths.owner_pid_file, paths.daemon_pid_file):
@@ -171,7 +172,7 @@ def test_claim_reclaims_a_view_whose_launcher_is_gone(paths):
         mount.release_lock(lock)
 
 
-def test_claim_refuses_a_view_a_live_launcher_owns(paths, holder):
+def test_claim_refuses_a_view_a_live_supervisor_owns(paths, holder):
     started = time.monotonic()
     with pytest.raises(mount.OwnedViewError, match=str(holder.pid)):
         mount.claim_view(paths, print)
@@ -194,10 +195,10 @@ def _watchdog(paths, pid, start_time):
         [
             sys.executable,
             "-m",
-            "nf_core_gwas_biofuse.mount",
-            "--launcher-pid",
+            "nf_biofuse_supervisor.mount",
+            "--supervisor-pid",
             str(pid),
-            "--launcher-start",
+            "--supervisor-start",
             start_time,
             "--view-dir",
             paths.view_dir,
@@ -208,16 +209,43 @@ def _watchdog(paths, pid, start_time):
     )
 
 
-def test_watchdog_reaps_only_the_view_of_the_launcher_it_watched(paths):
+def test_watchdog_reaps_only_the_view_of_the_supervisor_it_watched(paths):
     watched = _dead_process()
     os.makedirs(paths.mount_dir)
     _write_pid(paths.owner_pid_file, _dead_process())
-    # A newer launcher has reclaimed the view: the watchdog of the old one leaves it alone.
+    # A newer supervisor has reclaimed the view: the watchdog of the old one leaves it alone.
     assert _watchdog(paths, *watched).returncode == 0
     assert os.path.isdir(paths.mount_dir)
-    # Still owned by the launcher it watched: the watchdog reaps it.
+    # Still owned by the supervisor it watched: the watchdog reaps it.
     _write_pid(paths.owner_pid_file, watched)
     result = _watchdog(paths, *watched)
     assert result.returncode == 0, result.stderr
     assert "reaping" in result.stdout
     assert not os.path.exists(paths.view_dir)
+
+
+def test_reaping_removes_published_files_that_are_still_ours(tmp_path, paths):
+    os.makedirs(paths.mount_dir)
+    ours = tmp_path / "ours.csv"
+    changed = tmp_path / "changed.csv"
+    mount.publish(paths, str(ours), "ours\n")
+    mount.publish(paths, str(changed), "as written\n")
+    ours.write_text("ours\n")
+    changed.write_text("edited since\n")
+    messages, log = _messages()
+    assert mount.reap_view(paths, log)
+    assert not ours.exists()
+    assert changed.read_text() == "edited since\n"
+    assert any("changed.csv" in message for message in messages)
+    assert not os.path.exists(paths.view_dir)
+
+
+def test_the_watchdog_removes_the_published_manifest(tmp_path, paths):
+    watched = _dead_process()
+    os.makedirs(paths.mount_dir)
+    _write_pid(paths.owner_pid_file, watched)
+    target = tmp_path / "manifest.csv"
+    mount.publish(paths, str(target), "row\n")
+    target.write_text("row\n")
+    assert _watchdog(paths, *watched).returncode == 0
+    assert not target.exists()

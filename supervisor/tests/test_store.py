@@ -1,4 +1,4 @@
-# Written by the nf-core/gwas team and released under the MIT license.
+# SPDX-License-Identifier: Apache-2.0
 """Store validation, the contig census and the content digest."""
 
 import os
@@ -7,7 +7,7 @@ import time
 import pytest
 
 from conftest import make_store
-from nf_core_gwas_biofuse import store
+from nf_biofuse_supervisor import store
 
 
 @pytest.mark.parametrize("zarr_format", [2, 3])

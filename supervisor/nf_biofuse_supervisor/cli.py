@@ -1,15 +1,16 @@
-# Written by the nf-core/gwas team and released under the MIT license.
-"""``nf-core-gwas-biofuse``: mount one VCF Zarr cohort as a PLINK 1 view and run a command against it.
+# SPDX-License-Identifier: Apache-2.0
+"""``nf-biofuse-supervisor``: own the lifecycle of one BioFuse PLINK 1 view of a VCF Zarr store.
 
-    nf-core-gwas-biofuse run --vcz STORE.vcz --cohort-id ID --genome-build GRCh37 --ancestry EUR \\
-        [selection options] -- nextflow run nf-core/gwas --cohort_manifest '{cohort_manifest}' ...
-    nf-core-gwas-biofuse identity --vcz STORE.vcz [selection options]
-    nf-core-gwas-biofuse reap-stale [--state-root DIR]
+    nf-biofuse-supervisor serve --vcz STORE.vcz --manifest-template TEMPLATE --manifest OUT \\
+        [selection options] [--watch-pid PID] [--ready-file FILE]
+    nf-biofuse-supervisor identity --vcz STORE.vcz [selection options]
+    nf-biofuse-supervisor reap-stale [--state-root DIR]
 
-The literal token ``{cohort_manifest}`` anywhere in the command is replaced with the generated manifest
-path. ``BIOFUSE_COHORT_MANIFEST``, ``BIOFUSE_MOUNT``, ``BIOFUSE_BASENAME``, ``BIOFUSE_VIEW_ID``,
-``BIOFUSE_VIEW_RECORD`` and ``BIOFUSE_READINESS_SECONDS`` are exported into the command's environment.
-The command's exit status is the launcher's; a signal that ends the run is re-raised after teardown.
+``serve`` is what the nf-biofuse Nextflow plugin starts before a run: it computes the view identity,
+mounts the view, waits until the virtual trio is readable, writes the view record and the manifest
+rendered from the template, reports readiness in ``--ready-file``, and serves until it is asked to stop
+(``SIGTERM``, ``SIGINT``, ``SIGHUP`` or ``SIGQUIT``) or the process ``--watch-pid`` names is gone. It
+then tears the mount down, removes the manifest and the readiness report, and exits.
 """
 
 from __future__ import annotations
@@ -19,21 +20,22 @@ import json
 import os
 import re
 import signal
-import subprocess
 import sys
+import time
 from dataclasses import dataclass
 
 from . import __version__, identity, manifest, mount, record, store
 
-PROG = "nf-core-gwas-biofuse"
-MANIFEST_TOKEN = "{cohort_manifest}"
+PROG = "nf-biofuse-supervisor"
 PATH_CELL = re.compile(r"^[^\s,]+$")
 HANDLED_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
-COMMAND_POLL_INTERVAL = 0.2
+SERVE_POLL_INTERVAL = 0.2
 
 
 class UsageError(ValueError):
-    """An input or execution context the launcher refuses. Exit status 2."""
+    """An input or execution context the supervisor refuses. Exit status 2."""
+
+    exit_code = 2
 
 
 class Log:
@@ -41,7 +43,7 @@ class Log:
         self.verbose = verbose
 
     def __call__(self, message: str) -> None:
-        print(f"[{PROG}] {message}", file=sys.stderr, flush=True)
+        print(f"[{PROG} {time.strftime('%H:%M:%S')}] {message}", file=sys.stderr, flush=True)
 
     def debug(self, message: str) -> None:
         if self.verbose:
@@ -88,53 +90,47 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"{PROG} {__version__}")
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
 
-    run = subparsers.add_parser("run", help="Mount the view, run a command against it, tear the mount down.")
-    run.add_argument("--vcz", required=True, metavar="STORE", help="The VCF Zarr store directory.")
-    run.add_argument("--cohort-id", required=True, help="Cohort identifier for the manifest row.")
-    run.add_argument(
-        "--genome-build", required=True, choices=manifest.GENOME_BUILDS, help="Genome build of the cohort."
+    serve = subparsers.add_parser("serve", help="Mount the view, publish its manifest, serve until stopped.")
+    serve.add_argument("--vcz", required=True, metavar="STORE", help="The VCF Zarr store directory.")
+    serve.add_argument(
+        "--manifest-template",
+        required=True,
+        metavar="FILE",
+        help=f"Template of the manifest to write; placeholders: {', '.join(manifest.PLACEHOLDERS)}.",
     )
-    run.add_argument("--ancestry", required=True, help="Ancestry label for the manifest row.")
-    run.add_argument("--basename", help="Fileset stem of the virtual trio (default: the store name without .vcz).")
-    run.add_argument(
+    serve.add_argument("--manifest", required=True, metavar="FILE", help="Where to write the rendered manifest.")
+    serve.add_argument("--basename", help="Fileset stem of the virtual trio (default: the store name without .vcz).")
+    serve.add_argument(
         "--identity",
         choices=("declared", "digest"),
         default="declared",
-        help=(
-            "Declare the view identity to the pipeline (default), or leave the column empty so the pipeline "
-            "digests the trio through the mount."
-        ),
+        help="Fill {view_id} with the view identity (default), or leave it empty so the consumer digests the trio.",
     )
-    run.add_argument(
+    serve.add_argument(
         "--state-root",
         default=mount.default_state_root(),
-        help="Where the mountpoint and run state live (default: $XDG_RUNTIME_DIR, else $TMPDIR, else /tmp).",
+        help="Where the mountpoint and view state live (default: $XDG_RUNTIME_DIR, else $TMPDIR, else /tmp).",
     )
-    run.add_argument(
+    serve.add_argument(
         "--record-dir",
         default=os.getcwd(),
-        help="Where the <cohort_id>.biofuse_view.json record is written (default: the current directory).",
+        help="Where the <basename>.biofuse_view.json record is written (default: the current directory).",
     )
-    run.add_argument(
+    serve.add_argument(
         "--readiness-timeout",
         type=float,
         default=120.0,
         metavar="SECONDS",
         help="How long to wait for the virtual trio to become readable (default: 120).",
     )
-    run.add_argument(
-        "--shutdown-grace",
-        type=float,
-        default=30.0,
-        metavar="SECONDS",
-        help="How long a signalled command may take to exit before it is killed (default: 30).",
+    serve.add_argument("--watch-pid", type=int, metavar="PID", help="Tear down when this process is gone.")
+    serve.add_argument("--ready-file", metavar="FILE", help="Where readiness, or the reason for failing, is reported.")
+    serve.add_argument(
+        "--keep-state", action="store_true", help="Leave the view state directory and logs in place after teardown."
     )
-    run.add_argument(
-        "--keep-state", action="store_true", help="Leave the state directory and logs in place after the run."
-    )
-    run.add_argument("-v", "--verbose", action="store_true")
-    _add_selection_arguments(run)
-    daemon = run.add_argument_group("daemon options (do not enter the view identity)")
+    serve.add_argument("-v", "--verbose", action="store_true")
+    _add_selection_arguments(serve)
+    daemon = serve.add_argument_group("daemon options (do not enter the view identity)")
     daemon.add_argument(
         "--readahead-buffer-size", metavar="SIZE", help="Cap on the encoder's readahead window, for example 64M."
     )
@@ -142,7 +138,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--readahead-workers", type=int, metavar="N", help="Worker threads servicing the readahead pool."
     )
     daemon.add_argument("--log-level", choices=("WARNING", "INFO", "DEBUG"), help="Daemon logging verbosity.")
-    run.add_argument("command", nargs=argparse.REMAINDER, help="The command to run, after '--'.")
 
     identity_parser = subparsers.add_parser(
         "identity", help="Print the view identity and its preimage without mounting anything."
@@ -150,7 +145,7 @@ def build_parser() -> argparse.ArgumentParser:
     identity_parser.add_argument("--vcz", required=True, metavar="STORE", help="The VCF Zarr store directory.")
     _add_selection_arguments(identity_parser)
 
-    reap = subparsers.add_parser("reap-stale", help="Tear down views whose launcher is gone.")
+    reap = subparsers.add_parser("reap-stale", help="Tear down views whose supervisor is gone.")
     reap.add_argument("--state-root", default=mount.default_state_root())
     return parser
 
@@ -253,7 +248,7 @@ def _required_version(package: str) -> str:
     version = record.package_version(package)
     if version is None:
         raise UsageError(
-            f"{package} is not installed in this environment; create it from launcher/biofuse/environment.yml"
+            f"{package} is not installed in this environment; create it from supervisor/environment.yml"
         )
     return version
 
@@ -273,7 +268,7 @@ def default_basename(store_path: str) -> str:
 
 
 # ----------------------------------------------------------------------------------------------------
-# Execution-context validation the launcher owns
+# Execution-context validation the supervisor owns
 # ----------------------------------------------------------------------------------------------------
 
 
@@ -284,25 +279,56 @@ def validate_context(args: argparse.Namespace, basename: str) -> None:
             f"SLURM_JOB_NUM_NODES={nodes}: the mount is visible on one host only, so a multi-node allocation "
             "cannot use it"
         )
-    if not args.command:
-        raise UsageError("no command given after '--'")
-    # The launcher's own teardown runs fusermount; find it before anything is mounted.
+    # The supervisor's own teardown runs fusermount; find it before anything is mounted.
     mount.fusermount_path()
-    # The manifest is written unquoted, and its trio paths are made of the state root and the basename.
+    # The trio paths are substituted verbatim into the manifest, and they are made of the state root and
+    # the basename, so neither may carry a separator or whitespace.
     if not PATH_CELL.match(args.state_root):
         raise UsageError(f"--state-root {args.state_root!r} may not contain whitespace or a comma")
     if not PATH_CELL.match(basename) or "/" in basename:
         raise UsageError(f"--basename {basename!r} may not contain whitespace, a comma or a slash")
-    manifest.validate_cohort(args.cohort_id, args.genome_build, args.ancestry)
     if not os.path.isdir(args.record_dir):
         raise UsageError(f"--record-dir {args.record_dir!r} is not a directory")
     if args.samples_file and not os.path.isfile(args.samples_file):
         raise UsageError(f"--samples-file {args.samples_file!r} is not a file")
 
 
+def watched_process(pid: int | None) -> tuple[int, str | None] | None:
+    """``(pid, start time)`` of the process whose end ends the serve, so a reused pid never counts as it."""
+    if pid is None:
+        return None
+    start_time = mount.process_start_time(pid)
+    if start_time is None or not mount.process_alive(pid, start_time):
+        raise UsageError(f"--watch-pid {pid} is not a running process")
+    return pid, start_time
+
+
 # ----------------------------------------------------------------------------------------------------
-# Signals and the command
+# Readiness report and signals
 # ----------------------------------------------------------------------------------------------------
+
+
+class ReadyReport:
+    """The one file the plugin polls: ``{"status": "ready", ...}`` once the manifest is written, or
+    ``{"status": "failed", "exit_code": N, "error": ...}`` when the supervisor gives up first. It is
+    written atomically, so a reader never sees half of it."""
+
+    def __init__(self, path: str | None):
+        self.path = os.path.abspath(path) if path else None
+
+    @staticmethod
+    def render(status: str, **fields) -> str:
+        return json.dumps({"status": status, **fields}, indent=2) + "\n"
+
+    def write(self, text: str) -> None:
+        if self.path is not None:
+            manifest.write(self.path, text)
+
+    def failed(self, exit_code: int, error: str) -> None:
+        try:
+            self.write(self.render("failed", exit_code=exit_code, error=error))
+        except OSError:
+            pass
 
 
 class Signalled(Exception):
@@ -312,26 +338,17 @@ class Signalled(Exception):
 
 
 class SignalGuard:
-    """Records the first handled signal and forwards every one to the command's process group.
-
-    The handler never raises: the run notices the signal at its next poll and winds down through the
-    one teardown path, so a signal can neither interrupt the teardown nor land between starting the
-    command and registering it. Nextflow spawns children and container runtimes that must wind down
-    too, and a graceful Nextflow shutdown is what lets the mount be released cleanly."""
+    """Records the first stop signal. The handler never raises: the supervisor notices the signal at its
+    next poll and winds down through the one teardown path, so a signal can never interrupt the teardown."""
 
     def __init__(self):
         self.received: int | None = None
-        self._child: subprocess.Popen | None = None
-        self._forwarded = False
         self._previous: dict = {}
 
-    def install(self, log: Log) -> None:
+    def install(self) -> None:
+        # Installed unconditionally: these signals are the supervisor's stop protocol, and it runs in a
+        # session of its own, so none of them reaches it by accident from a terminal.
         for signum in HANDLED_SIGNALS:
-            # A signal ignored on entry stays ignored: a launcher backgrounded without job control
-            # has SIGINT set to SIG_IGN by its shell so that a terminal Ctrl-C does not reach it.
-            if signal.getsignal(signum) == signal.SIG_IGN:
-                log.debug(f"{signal.Signals(signum).name} is ignored in this context; cancel with SIGTERM")
-                continue
             self._previous[signum] = signal.signal(signum, self._handle)
 
     def restore(self) -> None:
@@ -339,75 +356,33 @@ class SignalGuard:
             signal.signal(signum, handler)
         self._previous.clear()
 
-    def _forward(self, signum: int) -> None:
-        if self._child is None:
-            return
-        self._forwarded = True
-        try:
-            os.killpg(self._child.pid, signum)
-        except ProcessLookupError:
-            pass
-
     def _handle(self, signum, _frame) -> None:
         if self.received is None:
             self.received = signum
-        self._forward(signum)
-
-    def adopt(self, child: subprocess.Popen | None) -> None:
-        """Register the command. A signal that arrived before it was registered is forwarded now."""
-        self._child = child
-        if child is not None and self.received is not None and not self._forwarded:
-            self._forward(self.received)
 
     def check(self) -> None:
         if self.received is not None:
             raise Signalled(self.received)
 
 
-def run_command(argv: list[str], env: dict, guard: SignalGuard, shutdown_grace: float, log: Log) -> int:
-    """Run the command in its own process group and return its status, ``128 + N`` for a death by
-    signal N as a shell reports it. On a handled signal the command has ``shutdown_grace`` seconds to
-    exit before its group is killed; the signal then propagates as :class:`Signalled`."""
+def detach_session(log: Log) -> None:
+    """Leave the caller's session and process group. Ctrl-C at a terminal signals Nextflow's foreground
+    process group, and closing the terminal hangs its session up; the supervisor must outlive both
+    until Nextflow has stopped using the mount, and it is stopped by the plugin or the watched pid."""
     try:
-        child = subprocess.Popen(argv, env=env, process_group=0)
-    except OSError as error:
-        log(f"cannot run {argv[0]!r}: {error.strerror}")
-        return 127 if isinstance(error, FileNotFoundError) else 126
-    guard.adopt(child)
-    try:
-        while guard.received is None:
-            try:
-                status = child.wait(timeout=COMMAND_POLL_INTERVAL)
-            except subprocess.TimeoutExpired:
-                continue
-            # A command that ended as the signal arrived ended because of it, most likely by the forward.
-            if guard.received is None:
-                return 128 - status if status < 0 else status
-        log(f"received {signal.Signals(guard.received).name}")
-        if child.poll() is not None:
-            raise Signalled(guard.received)
-        log(f"waiting up to {shutdown_grace:g}s for the command to exit")
-        try:
-            child.wait(timeout=shutdown_grace)
-        except subprocess.TimeoutExpired:
-            log(f"command did not exit within {shutdown_grace:g}s; sending SIGKILL")
-            try:
-                os.killpg(child.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            # Never waited for unbounded: a reader stuck on a wedged mount is in D state and dies only
-            # once the teardown has aborted the connection under it.
-            try:
-                child.wait(timeout=mount.UNMOUNT_TIMEOUT)
-            except subprocess.TimeoutExpired:
-                pass
-        raise Signalled(guard.received)
-    finally:
-        guard.adopt(None)
+        os.setsid()
+    except PermissionError:
+        log.debug("already a session leader")
 
 
-def substitute(argv: list[str], manifest_path: str) -> list[str]:
-    return [argument.replace(MANIFEST_TOKEN, manifest_path) for argument in argv]
+def serve_until_stopped(guard: SignalGuard, watched: tuple[int, str | None] | None, log: Log) -> None:
+    """Block until a stop signal arrives (raises :class:`Signalled`) or the watched process is gone."""
+    while True:
+        guard.check()
+        if watched is not None and not mount.process_alive(*watched):
+            log(f"watched process {watched[0]} is gone; tearing down")
+            return
+        time.sleep(SERVE_POLL_INTERVAL)
 
 
 # ----------------------------------------------------------------------------------------------------
@@ -415,34 +390,43 @@ def substitute(argv: list[str], manifest_path: str) -> list[str]:
 # ----------------------------------------------------------------------------------------------------
 
 
-def command_run(args: argparse.Namespace) -> int:
+def command_serve(args: argparse.Namespace) -> int:
     log = Log(args.verbose)
-    if args.command and args.command[0] == "--":
-        args.command = args.command[1:]
-    store_path = os.path.realpath(args.vcz)
-    basename = args.basename or default_basename(args.vcz)
-    validate_context(args, basename)
-    store_info = store.read_store(store_path)
-    plan = resolve_view(args, store_info, resolve_revision(args, store_path, log))
-    paths = mount.ViewPaths.under(os.path.realpath(args.state_root), plan.short_id)
-    trio = {extension: os.path.join(paths.mount_dir, f"{basename}.{extension}") for extension in ("bed", "bim", "fam")}
-    declared = plan.genotype_view_id if args.identity == "declared" else None
-    manifest_text = manifest.render(
-        cohort_id=args.cohort_id,
-        genome_build=args.genome_build,
-        ancestry=args.ancestry,
-        genotype_view_id=declared,
-        **trio,
-    )
+    detach_session(log)
+    report = ReadyReport(args.ready_file)
+    try:
+        watched = watched_process(args.watch_pid)
+        store_path = os.path.realpath(args.vcz)
+        basename = args.basename or default_basename(args.vcz)
+        validate_context(args, basename)
+        template = manifest.read_template(args.manifest_template)
+        store_info = store.read_store(store_path)
+        plan = resolve_view(args, store_info, resolve_revision(args, store_path, log))
+        paths = mount.ViewPaths.under(os.path.realpath(args.state_root), plan.short_id)
+        declared = plan.genotype_view_id if args.identity == "declared" else None
+        manifest_path = os.path.abspath(args.manifest)
+        manifest_text = manifest.render(
+            template, manifest.values(mount_dir=paths.mount_dir, basename=basename, view_id=declared)
+        )
+        manifest.check_target(manifest_path, manifest_text)
+    except (UsageError, store.StoreError, manifest.ManifestError, mount.MountError) as failure:
+        report.failed(getattr(failure, "exit_code", 2), str(failure))
+        raise
     log.debug(f"view id      : {plan.genotype_view_id}")
     log.debug(f"state dir    : {paths.view_dir}")
 
-    lock = mount.claim_view(paths, log)
     guard = SignalGuard()
-    guard.install(log)
+    guard.install()
+    try:
+        lock = mount.claim_view(paths, log)
+    except mount.MountError as failure:
+        report.failed(failure.exit_code, str(failure))
+        guard.restore()
+        raise
     daemon = None
     watchdog = None
     exit_status = 1
+    released = False
     try:
         argv = mount.daemon_argv(store_path, basename, paths.mount_dir, plan.daemon_options)
         log.debug(f"daemon cmd   : {' '.join(argv)}")
@@ -452,60 +436,67 @@ def command_run(args: argparse.Namespace) -> int:
         readiness = mount.wait_ready(paths, basename, daemon, args.readiness_timeout, guard.check)
         log(f"mount ready in {readiness:.3f}s at {paths.mount_dir} (view {plan.short_id})")
 
-        view_record = record.build_record(
-            cohort_id=args.cohort_id,
-            preimage=plan.preimage,
-            genotype_view_id=plan.genotype_view_id,
-            identity_mode=args.identity,
-            declared_genotype_view_id=declared,
-            runtime=record.runtime_versions(daemon.pid),
-            mount_readiness_seconds=readiness,
-            mount={
-                "store": store_path,
-                "zarr_format": store_info.zarr_format,
-                "mountpoint": paths.mount_dir,
-                "basename": basename,
-                "daemon_options": plan.daemon_options,
-            },
+        record_file = record.record_path(os.path.abspath(args.record_dir), basename)
+        record.write_record(
+            record_file,
+            record.build_record(
+                preimage=plan.preimage,
+                genotype_view_id=plan.genotype_view_id,
+                identity_mode=args.identity,
+                declared_genotype_view_id=declared,
+                runtime=record.runtime_versions(daemon.pid),
+                mount_readiness_seconds=readiness,
+                mount={
+                    "store": store_path,
+                    "zarr_format": store_info.zarr_format,
+                    "mountpoint": paths.mount_dir,
+                    "basename": basename,
+                    "daemon_options": plan.daemon_options,
+                },
+                manifest={"path": manifest_path, "template": os.path.abspath(args.manifest_template)},
+            ),
         )
-        record_file = record.record_path(os.path.abspath(args.record_dir), args.cohort_id)
-        record.write_record(record_file, view_record)
         log(f"view record: {record_file}")
-        manifest.write(paths.manifest, manifest_text)
-        log(f"cohort manifest: {paths.manifest}")
-
-        env = dict(
-            os.environ,
-            BIOFUSE_COHORT_MANIFEST=paths.manifest,
-            BIOFUSE_MOUNT=paths.mount_dir,
-            BIOFUSE_BASENAME=basename,
-            BIOFUSE_VIEW_ID=plan.genotype_view_id,
-            BIOFUSE_VIEW_RECORD=record_file,
-            BIOFUSE_READINESS_SECONDS=f"{readiness:.3f}",
-        )
-        command = substitute(args.command, paths.manifest)
-        log.debug(f"exec         : {' '.join(command)}")
+        # Registered before it is written, so a teardown from any point on removes it.
+        mount.publish(paths, manifest_path, manifest_text)
+        manifest.write(manifest_path, manifest_text)
+        log(f"manifest: {manifest_path}")
         guard.check()
-        exit_status = run_command(command, env, guard, args.shutdown_grace, log)
-        log(f"command exited with status {exit_status}")
+        if report.path is not None:
+            ready = {
+                "manifest": manifest_path,
+                "mount": paths.mount_dir,
+                "basename": basename,
+                "genotype_view_id": plan.genotype_view_id,
+                "identity_mode": args.identity,
+                "record": record_file,
+                "readiness_seconds": round(readiness, 3),
+                "view_dir": paths.view_dir,
+            }
+            ready_text = report.render("ready", **ready)
+            mount.publish(paths, report.path, ready_text)
+            report.write(ready_text)
+        log("serving; stop with SIGTERM")
+        serve_until_stopped(guard, watched, log)
+        exit_status = 0
     except Signalled as ended:
-        log(f"tearing the mount down after {signal.Signals(ended.signum).name}")
-        exit_status = 128 + ended.signum
+        log(f"received {signal.Signals(ended.signum).name}; tearing down")
+        exit_status = 0
     except mount.MountError as failure:
         log(f"error: {failure}")
         exit_status = failure.exit_code
+        report.failed(exit_status, str(failure))
         _print_daemon_log(paths, log)
     finally:
-        log.debug("cleanup: starting")
-        mount.teardown(paths, daemon, watchdog, args.keep_state, log)
+        log.debug("teardown: starting")
+        released = mount.teardown(paths, daemon, watchdog, args.keep_state, log)
         mount.release_lock(lock)
-        log.debug("cleanup: done")
         guard.restore()
-
-    if guard.received is not None:
-        # End the way the signal would have ended the launcher, so a calling shell sees it.
-        signal.signal(guard.received, signal.SIG_DFL)
-        os.kill(os.getpid(), guard.received)
+        log.debug("teardown: done")
+    if not released:
+        log("teardown left the mount in place; see the recovery section of the documentation")
+        return 1
+    log(f"stopped with status {exit_status}")
     return exit_status
 
 
@@ -538,7 +529,7 @@ def command_reap_stale(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    handlers = {"run": command_run, "identity": command_identity, "reap-stale": command_reap_stale}
+    handlers = {"serve": command_serve, "identity": command_identity, "reap-stale": command_reap_stale}
     try:
         return handlers[args.subcommand](args)
     except (UsageError, store.StoreError, manifest.ManifestError, mount.MountError) as failure:

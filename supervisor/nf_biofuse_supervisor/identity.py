@@ -1,9 +1,9 @@
-# Written by the nf-core/gwas team and released under the MIT license.
+# SPDX-License-Identifier: Apache-2.0
 """Content-addressed identity of a BioFuse PLINK 1 view.
 
-The pipeline keys every artifact it derives from a cohort on the cohort's ``genotype_view_id``. For a
-mounted view there are no bytes on disk to digest, so the launcher declares the identity instead, and the
-declaration has to answer the same question a digest would: would this mount serve the same bytes as
+A consumer such as nf-core/gwas keys every artifact it derives from a cohort on the cohort's
+``genotype_view_id``. For a mounted view there are no bytes on disk to digest, so the supervisor declares
+the identity instead, and the declaration has to answer the same question a digest would: would this mount serve the same bytes as
 another one? Everything that changes the served bytes is in the preimage; everything that only changes
 how fast, where or under what name they are served is not.
 
@@ -22,9 +22,10 @@ The canonical form is JSON with keys sorted, no whitespace and UTF-8 text unesca
 is the only PLINK 1 view this backend serves and it is declared rather than left implicit.
 
 Excluded on purpose: the fileset basename, readahead workers and buffer, log options, mountpoint, state
-root, host, cohort metadata (``cohort_id``, ``genome_build``, ``ancestry``), and the pyfuse3, libfuse3,
-zarr and numcodecs versions. None of them changes a byte of the served trio; they are recorded in the
-sidecar record instead (see :mod:`nf_core_gwas_biofuse.record`).
+root, host, the manifest template and everything it declares (for nf-core/gwas, the cohort metadata
+``cohort_id``, ``genome_build`` and ``ancestry``), and the pyfuse3, libfuse3, zarr and numcodecs versions.
+None of them changes a byte of the served trio; they are recorded in the sidecar record instead (see
+:mod:`nf_biofuse_supervisor.record`).
 """
 
 from __future__ import annotations
@@ -32,6 +33,8 @@ from __future__ import annotations
 import hashlib
 import json
 
+# The preimage layout version. Carried over verbatim from the nf-core/gwas launcher this supervisor was
+# ported from, so a view keeps the identity the launcher declared for it; changing the string moves every id.
 SCHEMA = "nf-core/gwas/biofuse-view-identity/1"
 NAMESPACE = "biofuse"
 BACKEND = {"family": "biofuse", "view": "mount-plink"}

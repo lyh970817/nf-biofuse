@@ -1,5 +1,5 @@
-# Written by the nf-core/gwas team and released under the MIT license.
-"""The VCF Zarr store as the launcher reads it: root validation, root attributes, the contig census the
+# SPDX-License-Identifier: Apache-2.0
+"""The VCF Zarr store as the supervisor reads it: root validation, root attributes, the contig census the
 autosome policy is decided on, and the content digest that is the store's default revision."""
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ _HASH_BLOCK = 1 << 20
 
 
 class StoreError(ValueError):
-    """The path is not a store the launcher can serve."""
+    """The path is not a store the supervisor can serve."""
 
 
 @dataclass(frozen=True)

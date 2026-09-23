@@ -1,93 +1,125 @@
-# Written by the nf-core/gwas team and released under the MIT license.
-"""The temporary cohort manifest the launched pipeline reads.
+# SPDX-License-Identifier: Apache-2.0
+"""The manifest the pipeline reads, rendered from a user template.
 
-One row in the pipeline's own cohort manifest schema (``assets/schema_cohort_manifest.json``): only the
-PLINK 1 group and the declared identity are populated. The column constraints repeated here are the
-schema's, so the launcher rejects a cohort declaration it would otherwise hand to the pipeline to reject.
+The supervisor knows nothing of any pipeline's input format. The template is the pipeline's own
+samplesheet (or any text file) with placeholders where the mounted view goes; the supervisor fills them
+in once the view is readable and writes the result where the pipeline expects it. A placeholder is a
+lowercase name in braces; every other character, braces included, is copied verbatim:
+
+    {bed} {bim} {fam}   absolute paths of the mounted members
+    {prefix}            the mounted fileset prefix, <mount>/<basename>, as PLINK's --bfile takes it
+    {mount}             the mount directory
+    {basename}          the fileset stem
+    {view_id}           the view identity in declared mode, empty in digest mode
+
+An nf-core/gwas cohort manifest template, for example:
+
+    cohort_id,genome_build,ancestry,pgen,psam,pvar,bed,bim,fam,genotype_view_id
+    cohort_a,GRCh38,EUR,,,,{bed},{bim},{fam},{view_id}
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 
-COLUMNS = (
-    "cohort_id",
-    "genome_build",
-    "ancestry",
-    "pgen",
-    "psam",
-    "pvar",
-    "bed",
-    "bim",
-    "fam",
-    "genotype_view_id",
-)
-HEADER = ",".join(COLUMNS)
-GENOME_BUILDS = ("GRCh37", "GRCh38")
-COHORT_ID_PATTERN = re.compile(r"^\S+$")
-ANCESTRY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
-VIEW_ID_PATTERN = re.compile(r"^([a-z][a-z0-9_]*:)?[0-9a-f]{16,64}$")
-# Cells are written unquoted, so a cell may not carry the separator or whitespace; the schema's own
-# ``^\S+`` patterns already forbid the latter for every path column.
-CELL_PATTERN = re.compile(r"^[^\s,]+$")
+PLACEHOLDER = re.compile(r"\{([a-z_]+)\}")
+PLACEHOLDERS = ("bed", "bim", "fam", "prefix", "mount", "basename", "view_id")
 
 
 class ManifestError(ValueError):
-    """A cohort declaration the pipeline's manifest schema would reject."""
+    """A template or a manifest target the supervisor refuses. Exit status 2."""
+
+    exit_code = 2
 
 
-def validate_cohort(cohort_id: str, genome_build: str, ancestry: str) -> None:
-    if not COHORT_ID_PATTERN.match(cohort_id) or "," in cohort_id:
-        raise ManifestError(f"cohort_id {cohort_id!r} must be non-empty and contain no whitespace or comma")
-    if genome_build not in GENOME_BUILDS:
-        raise ManifestError(f"genome_build must be one of {', '.join(GENOME_BUILDS)}, got {genome_build!r}")
-    if not ANCESTRY_PATTERN.match(ancestry):
-        raise ManifestError(
-            f"ancestry {ancestry!r} must start with a letter or digit and contain only letters, digits, "
-            "underscores, dots and dashes"
-        )
+def read_template(path: str) -> str:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+    except OSError as error:
+        raise ManifestError(f"cannot read the manifest template {path!r}: {error.strerror}") from None
 
 
-def render(
-    *,
-    cohort_id: str,
-    genome_build: str,
-    ancestry: str,
-    bed: str,
-    bim: str,
-    fam: str,
-    genotype_view_id: str | None,
-) -> str:
-    """The manifest text: the exact header, then one row with the PLINK 1 trio and the identity."""
-    validate_cohort(cohort_id, genome_build, ancestry)
-    for column, path, extension in (("bed", bed, ".bed"), ("bim", bim, ".bim"), ("fam", fam, ".fam")):
-        if not CELL_PATTERN.match(path) or not path.endswith(extension):
-            raise ManifestError(f"{column} path {path!r} must end in {extension} and contain no whitespace or comma")
-    if genotype_view_id is not None and not VIEW_ID_PATTERN.match(genotype_view_id):
-        raise ManifestError(f"genotype_view_id {genotype_view_id!r} does not match the schema pattern")
-    cells = {
-        "cohort_id": cohort_id,
-        "genome_build": genome_build,
-        "ancestry": ancestry,
-        "bed": bed,
-        "bim": bim,
-        "fam": fam,
-        "genotype_view_id": genotype_view_id or "",
+def values(*, mount_dir: str, basename: str, view_id: str | None) -> dict[str, str]:
+    prefix = os.path.join(mount_dir, basename)
+    return {
+        "bed": f"{prefix}.bed",
+        "bim": f"{prefix}.bim",
+        "fam": f"{prefix}.fam",
+        "prefix": prefix,
+        "mount": mount_dir,
+        "basename": basename,
+        "view_id": view_id or "",
     }
-    row = ",".join(cells.get(column, "") for column in COLUMNS)
-    return f"{HEADER}\n{row}\n"
+
+
+def render(template: str, fields: dict[str, str]) -> str:
+    """Substitute every placeholder; a name that is not a placeholder is refused, since it is a typo that
+    would otherwise reach the pipeline as literal text."""
+    unknown = sorted({name for name in PLACEHOLDER.findall(template) if name not in fields})
+    if unknown:
+        raise ManifestError(
+            f"unknown placeholder(s) {', '.join('{' + name + '}' for name in unknown)} in the manifest template; "
+            f"known: {', '.join('{' + name + '}' for name in PLACEHOLDERS)}"
+        )
+    return PLACEHOLDER.sub(lambda match: fields[match.group(1)], template)
+
+
+def digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def check_target(path: str, text: str) -> None:
+    """Refuse to replace a file that is not this manifest. The manifest is removed at teardown, so a file
+    already at the target is either one a previous run of the same view left behind, which is identical,
+    or somebody else's, which the supervisor must neither overwrite nor later delete."""
+    directory = os.path.dirname(path) or "."
+    if not os.path.isdir(directory):
+        raise ManifestError(f"the manifest directory {directory!r} does not exist")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            existing = handle.read()
+    except FileNotFoundError:
+        return
+    except (OSError, UnicodeDecodeError) as error:
+        raise ManifestError(f"cannot read the existing file at the manifest path {path!r}: {error}") from None
+    if existing != text:
+        raise ManifestError(f"refusing to overwrite {path!r}: it exists and is not this view's manifest")
 
 
 def write(path: str, text: str) -> None:
-    """Write the manifest readable by its owner only: it names paths under a private state root."""
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    """Write ``text`` atomically, readable by its owner only: it names paths under a private state root.
+    A reader sees either no file or all of it."""
+    temporary = f"{path}.{os.getpid()}.tmp"
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        handle = os.fdopen(descriptor, "w", encoding="utf-8")
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(text)
+        os.replace(temporary, path)
     except BaseException:
-        os.close(descriptor)
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
         raise
-    with handle:
-        # The mode in os.open only applies to a newly created file; an existing one keeps its mode.
-        os.fchmod(descriptor, 0o600)
-        handle.write(text)
+
+
+def remove_if_unchanged(path: str, sha256: str) -> bool:
+    """Delete ``path`` if it still holds the content whose digest is ``sha256``. True when it is gone."""
+    try:
+        with open(path, "rb") as handle:
+            current = hashlib.sha256(handle.read()).hexdigest()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    if current != sha256:
+        return False
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    return True

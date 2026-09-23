@@ -1,18 +1,18 @@
-# Written by the nf-core/gwas team and released under the MIT license.
+# SPDX-License-Identifier: Apache-2.0
 
 [build-system]
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "nf-core-gwas-biofuse"
+name = "nf-biofuse-supervisor"
 version = "0.1.0"
-description = "Host-side launcher that serves a VCF Zarr cohort to nf-core/gwas as a BioFuse PLINK 1 view"
+description = "Lifecycle owner of a BioFuse PLINK 1 view of a VCF Zarr store, started by the nf-biofuse Nextflow plugin"
 readme = "README.md"
 requires-python = ">=3.12"
-license = "MIT"
+license = "Apache-2.0"
 # The versions here are the ones the view identity is measured on: biofuse and vcztools enter the
-# identity preimage, so a change to either is a change to every declared genotype_view_id.
+# identity preimage, so a change to either is a change to every declared view identity.
 dependencies = [
     "biofuse==0.1.0",
     "vcztools==0.2.0",
@@ -23,13 +23,13 @@ dependencies = [
 
 [project.optional-dependencies]
 # bio2zarr's vcf extra is cyvcf2, which vcf2zarr needs to read the VCF the local FUSE tier builds its store from.
-test = ["pytest>=8", "jsonschema>=4", "bio2zarr[vcf]==0.2.1"]
+test = ["pytest>=8", "bio2zarr[vcf]==0.2.1"]
 
 [project.scripts]
-nf-core-gwas-biofuse = "nf_core_gwas_biofuse.cli:main"
+nf-biofuse-supervisor = "nf_biofuse_supervisor.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["nf_core_gwas_biofuse*"]
+include = ["nf_biofuse_supervisor*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

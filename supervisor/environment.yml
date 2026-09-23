@@ -1,4 +1,4 @@
-name: nf-core-gwas-biofuse
+name: nf-biofuse-supervisor
 channels:
   - conda-forge
   - nodefaults
@@ -17,4 +17,6 @@ dependencies:
       - bio2zarr==0.2.1
       - zarr==3.4.0
       - numcodecs==0.17.0
+      # Resolved against this file's directory: create the environment from anywhere with
+      # `conda env create -f supervisor/environment.yml -p <env>`.
       - -e .

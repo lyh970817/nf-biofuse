@@ -1,9 +1,9 @@
-# Written by the nf-core/gwas team and released under the MIT license.
+# SPDX-License-Identifier: Apache-2.0
 """The mount daemon: biofuse's own ``mount-plink`` command, run with ``auto_unmount`` set.
 
 Adapter for biofuse 0.1.0, whose ``fuse_adapter.mount`` builds its option set as
 ``pyfuse3.default_options`` plus ``fsname=`` and ``ro`` and exposes no CLI or API surface for further
-mount options. Without it the launcher materially breaks: ``auto_unmount`` makes the kernel drop the
+mount options. Without it the supervisor materially breaks: ``auto_unmount`` makes the kernel drop the
 mount when the daemon exits, which is the only teardown that survives a SIGKILL, a cgroup kill or a
 session teardown -- exactly where no userspace cleanup runs. A mount that outlives its daemon blocks
 every process that touches it in uninterruptible sleep, and nothing short of a kernel connection abort
@@ -16,7 +16,7 @@ needs no ptrace, which matters because the daemon runs in its own session.
 
 Usage is exactly biofuse's::
 
-    python -m nf_core_gwas_biofuse.daemon mount-plink STORE.vcz MOUNTDIR --basename cohort --max-alleles 2
+    python -m nf_biofuse_supervisor.daemon mount-plink STORE.vcz MOUNTDIR --basename cohort --max-alleles 2
 """
 
 from __future__ import annotations

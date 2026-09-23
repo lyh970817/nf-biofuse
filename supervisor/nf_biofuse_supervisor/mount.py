@@ -1,4 +1,4 @@
-# Written by the nf-core/gwas team and released under the MIT license.
+# SPDX-License-Identifier: Apache-2.0
 """Mount lifecycle: the state layout, daemon start, readiness, teardown, the SIGKILL watchdog and stale
 reclaim.
 
@@ -9,7 +9,7 @@ process that touches such a mountpoint blocks in uninterruptible sleep (``D`` st
 killed, not even with SIGKILL. That takes out the machine, not just the run. Four properties defend
 against it:
 
-1. ``auto_unmount`` (set by :mod:`nf_core_gwas_biofuse.daemon`) makes the KERNEL drop the mount when
+1. ``auto_unmount`` (set by :mod:`nf_biofuse_supervisor.daemon`) makes the KERNEL drop the mount when
    the daemon dies. It is the only mechanism that survives a SIGKILL, a cgroup kill or a session
    teardown, where no userspace handler runs.
 2. ``fusermount3 -u`` HANGS on a wedged mount rather than returning non-zero, so ``-u || -uz`` never
@@ -26,30 +26,40 @@ against it:
 OWNERSHIP
 ---------
 A view is owned by whoever holds an exclusive ``flock`` on ``view-<id>.lock``, beside the view
-directory. The launcher takes it before it touches the view and holds it until it exits, so the kernel
-releases it the moment the launcher dies, however it dies, and a pid that has since been reused can never
-look like a live owner. The watchdog waits on the same lock, which is how it learns that the launcher is
-gone, and it reaps only while holding it, so it can never tear down a view a newer launcher has already
-reclaimed. The lock file outlives the view on purpose: deleting it would let two processes lock two
-different files of the same name. ``owner.pid`` names the launcher that holds the lock.
+directory. The supervisor takes it before it touches the view and holds it until it exits, so the kernel
+releases it the moment the supervisor dies, however it dies, and a pid that has since been reused can
+never look like a live owner. The watchdog waits on the same lock, which is how it learns that the
+supervisor is gone, and it reaps only while holding it, so it can never tear down a view a newer
+supervisor has already reclaimed. The lock file outlives the view on purpose: deleting it would let two
+processes lock two different files of the same name. ``owner.pid`` names the supervisor that holds the
+lock.
+
+PUBLISHED FILES
+---------------
+The manifest and the readiness report live outside the view directory, where the pipeline and the plugin
+read them. Each is registered in ``published.json`` with the digest of its content before it is written,
+and every teardown -- the supervisor's own, the watchdog's and ``reap-stale`` -- removes it first, so
+nothing new can resolve the trio once teardown starts. A file whose content has changed since is left
+alone: it is no longer the supervisor's.
 
 State layout, under the state root::
 
-    nf-core-gwas-biofuse/
+    nf-biofuse/
         view-<16 hex>.lock   the ownership lock (empty, kept)
         view-<16 hex>/
             mnt/                 the mountpoint
-            owner.pid            "<launcher pid> <launcher start time>"
+            owner.pid            "<supervisor pid> <supervisor start time>"
             daemon.pid           "<daemon pid> <daemon start time>"
+            published.json       the files outside the view to remove at teardown, with their digests
             logs/daemon.log      the daemon's stdout and stderr
             logs/watchdog.log    the watchdog's report, when it had to act and the state is kept
-            cohort_manifest.csv  the temporary cohort manifest, while the command runs
 """
 
 from __future__ import annotations
 
 import argparse
 import fcntl
+import json
 import os
 import shutil
 import signal
@@ -58,21 +68,23 @@ import sys
 import time
 from dataclasses import dataclass
 
-STATE_DIRNAME = "nf-core-gwas-biofuse"
+from . import manifest
+
+STATE_DIRNAME = "nf-biofuse"
 VIEW_PREFIX = "view-"
 LOCK_SUFFIX = ".lock"
 UNMOUNT_TIMEOUT = 5.0
 DAEMON_TERM_GRACE = 5.0
 READ_PROBE_TIMEOUT = 5.0
 READY_POLL_INTERVAL = 0.05
-# Long enough for a watchdog to finish reaping the previous launcher's view: three capped unmounts, a
+# Long enough for a watchdog to finish reaping the previous supervisor's view: three capped unmounts, a
 # daemon grace period and three more capped unmounts.
 CLAIM_WAIT = 60.0
 CLAIM_POLL_INTERVAL = 0.2
 
 
 class MountError(RuntimeError):
-    """A lifecycle step failed; ``exit_code`` is the launcher's exit status for it."""
+    """A lifecycle step failed; ``exit_code`` is the supervisor's exit status for it."""
 
     exit_code = 1
 
@@ -134,8 +146,8 @@ class ViewPaths:
         return os.path.join(self.log_dir, "watchdog.log")
 
     @property
-    def manifest(self) -> str:
-        return os.path.join(self.view_dir, "cohort_manifest.csv")
+    def published(self) -> str:
+        return os.path.join(self.view_dir, "published.json")
 
 
 # ----------------------------------------------------------------------------------------------------
@@ -280,7 +292,7 @@ def process_start_time(pid: int) -> str | None:
 
 def process_alive(pid: int, start_time: str | None = None) -> bool:
     """True while ``pid`` runs. A zombie has exited and counts as gone, which matters because the
-    launcher's own children stay zombies until they are reaped. With ``start_time``, a process that
+    supervisor's own children stay zombies until they are reaped. With ``start_time``, a process that
     reuses the pid counts as gone too."""
     stat = _proc_stat(pid)
     if stat is None or stat[0] in ("Z", "X"):
@@ -350,6 +362,29 @@ def release_lock(descriptor: int | None) -> None:
         os.close(descriptor)
 
 
+def publish(paths: ViewPaths, path: str, text: str) -> None:
+    """Register ``path``, about to be written with ``text``, for removal at teardown."""
+    entries = _published(paths)
+    entries = [entry for entry in entries if entry["path"] != path]
+    entries.append({"path": path, "sha256": manifest.digest(text)})
+    manifest.write(paths.published, json.dumps(entries, indent=2) + "\n")
+
+
+def _published(paths: ViewPaths) -> list[dict]:
+    try:
+        with open(paths.published, encoding="utf-8") as handle:
+            return list(json.load(handle))
+    except (OSError, ValueError):
+        return []
+
+
+def remove_published(paths: ViewPaths, log) -> None:
+    """Remove every registered file that still holds what the supervisor wrote."""
+    for entry in _published(paths):
+        if not manifest.remove_if_unchanged(entry["path"], entry["sha256"]):
+            log(f"leaving {entry['path']} in place: its content changed since it was written")
+
+
 def remove_state(paths: ViewPaths, log) -> bool:
     """Remove the view directory, but only once its mountpoint is gone: removing a directory tree
     walks it, and walking a mountpoint stats it."""
@@ -361,8 +396,9 @@ def remove_state(paths: ViewPaths, log) -> bool:
 
 
 def reap_view(paths: ViewPaths, log, keep_state: bool = False) -> bool:
-    """Reap one view whose launcher is gone; the caller holds its lock. True when no mount remains
+    """Reap one view whose supervisor is gone; the caller holds its lock. True when no mount remains
     and, unless ``keep_state``, no state either."""
+    remove_published(paths, log)
     unmount(paths.mount_dir, log)
     stop_daemon(read_pid_file(paths.daemon_pid_file), log)
     # The daemon dying releases an auto_unmount mount; confirm and force if not.
@@ -388,7 +424,7 @@ def view_dirs(state_root: str) -> list[str]:
 
 
 def reap_stale(state_root: str, log) -> int:
-    """Reap every view under ``state_root`` whose launcher is gone. Returns the number reaped."""
+    """Reap every view under ``state_root`` whose supervisor is gone. Returns the number reaped."""
     log(f"reaping stale biofuse views under {os.path.join(state_root, STATE_DIRNAME)}")
     reaped = 0
     directories = view_dirs(state_root)
@@ -397,7 +433,7 @@ def reap_stale(state_root: str, log) -> int:
         lock = try_lock(paths)
         if lock is None:
             owner = read_pid_file(paths.owner_pid_file)
-            log(f"  {view_dir}: in use (launcher {owner[0] if owner else 'unknown'}), leaving it alone")
+            log(f"  {view_dir}: in use (supervisor {owner[0] if owner else 'unknown'}), leaving it alone")
             continue
         try:
             log(f"  {view_dir}: orphaned, reaping")
@@ -411,20 +447,20 @@ def reap_stale(state_root: str, log) -> int:
 
 
 def claim_view(paths: ViewPaths, log) -> int:
-    """Take ownership of the view: refuse if a live launcher owns it, reap it if it is stale. Returns
+    """Take ownership of the view: refuse if a live supervisor owns it, reap it if it is stale. Returns
     the lock descriptor, which the caller holds until it exits."""
     os.makedirs(os.path.dirname(paths.view_dir), exist_ok=True)
     deadline = time.monotonic() + CLAIM_WAIT
     while (lock := try_lock(paths)) is None:
         owner = read_pid_file(paths.owner_pid_file)
         if owner is not None and process_alive(*owner):
-            raise OwnedViewError(f"another launcher (pid {owner[0]}) already owns the view at {paths.view_dir}")
-        # The holder is not a live launcher, so it is a watchdog reaping the previous one's view.
+            raise OwnedViewError(f"another supervisor (pid {owner[0]}) already owns the view at {paths.view_dir}")
+        # The holder is not a live supervisor, so it is a watchdog reaping the previous one's view.
         if time.monotonic() > deadline:
             raise OwnedViewError(f"the view at {paths.view_dir} stayed locked for {CLAIM_WAIT:g}s")
         time.sleep(CLAIM_POLL_INTERVAL)
     try:
-        # Holding the lock, any state already here belongs to a launcher that is gone.
+        # Holding the lock, any state already here belongs to a supervisor that is gone.
         if os.path.isdir(paths.view_dir):
             log(f"reclaiming stale state from a previous run: {paths.view_dir}")
             if not reap_view(paths, log):
@@ -443,7 +479,7 @@ def daemon_argv(store: str, basename: str, mount_dir: str, options: list[str]) -
     return [
         sys.executable,
         "-m",
-        "nf_core_gwas_biofuse.daemon",
+        "nf_biofuse_supervisor.daemon",
         "mount-plink",
         store,
         mount_dir,
@@ -455,7 +491,7 @@ def daemon_argv(store: str, basename: str, mount_dir: str, options: list[str]) -
 
 def start_daemon(paths: ViewPaths, argv: list[str]) -> subprocess.Popen:
     """Start the daemon in its own session so no terminal hangup or job-control signal reaches it;
-    the launcher, or its watchdog, is what stops it."""
+    the supervisor, or its watchdog, is what stops it."""
     with open(paths.daemon_log, "ab") as log_handle:
         process = subprocess.Popen(
             argv, stdin=subprocess.DEVNULL, stdout=log_handle, stderr=subprocess.STDOUT, start_new_session=True
@@ -466,14 +502,14 @@ def start_daemon(paths: ViewPaths, argv: list[str]) -> subprocess.Popen:
 
 def start_watchdog(paths: ViewPaths, keep_state: bool) -> subprocess.Popen:
     """A handler cannot fire for SIGKILL, so a detached child waits on the view lock, which the kernel
-    releases when the launcher dies, and performs the same teardown."""
+    releases when the supervisor dies, and performs the same teardown."""
     argv = [
         sys.executable,
         "-m",
-        "nf_core_gwas_biofuse.mount",
-        "--launcher-pid",
+        "nf_biofuse_supervisor.mount",
+        "--supervisor-pid",
         str(os.getpid()),
-        "--launcher-start",
+        "--supervisor-start",
         process_start_time(os.getpid()) or "",
         "--view-dir",
         paths.view_dir,
@@ -509,14 +545,11 @@ def wait_ready(paths: ViewPaths, basename: str, daemon: subprocess.Popen, timeou
 
 def teardown(
     paths: ViewPaths, daemon: subprocess.Popen | None, watchdog: subprocess.Popen | None, keep_state: bool, log
-) -> None:
-    """The one exit path for every way a run ends. The watchdog is stopped last, so a launcher killed
-    part-way through still has its teardown finished for it."""
-    # Remove the manifest first so nothing new can resolve the trio.
-    try:
-        os.unlink(paths.manifest)
-    except FileNotFoundError:
-        pass
+) -> bool:
+    """The one exit path for every way a serve ends. The watchdog is stopped last, so a supervisor killed
+    part-way through still has its teardown finished for it. True when no mount remains."""
+    # Remove the manifest and the readiness report first so nothing new can resolve the trio.
+    remove_published(paths, log)
     # Unmount before stopping the daemon: a graceful unmount lets an in-flight reader drain.
     unmount(paths.mount_dir, log)
     if daemon is not None:
@@ -526,6 +559,7 @@ def teardown(
     if mount_present(paths.mount_dir):
         log("mount outlived the daemon; forcing")
         unmount(paths.mount_dir, log)
+    released = not mount_present(paths.mount_dir)
     if keep_state:
         log(f"--keep-state set, leaving {paths.view_dir}")
     else:
@@ -536,6 +570,7 @@ def teardown(
             watchdog.wait(timeout=5)
         except subprocess.TimeoutExpired:
             watchdog.kill()
+    return released
 
 
 # ----------------------------------------------------------------------------------------------------
@@ -544,14 +579,14 @@ def teardown(
 
 
 def watchdog_main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="nf_core_gwas_biofuse.mount", description="SIGKILL watchdog (internal).")
-    parser.add_argument("--launcher-pid", type=int, required=True)
-    parser.add_argument("--launcher-start", required=True)
+    parser = argparse.ArgumentParser(prog="nf_biofuse_supervisor.mount", description="SIGKILL watchdog (internal).")
+    parser.add_argument("--supervisor-pid", type=int, required=True)
+    parser.add_argument("--supervisor-start", required=True)
     parser.add_argument("--view-dir", required=True)
     parser.add_argument("--keep-state", action="store_true")
     args = parser.parse_args(argv)
 
-    # The watchdog must not die with the launcher's session or terminal.
+    # The watchdog must not die with the supervisor's session or terminal.
     for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGQUIT):
         signal.signal(signum, signal.SIG_IGN)
 
@@ -559,15 +594,15 @@ def watchdog_main(argv: list[str] | None = None) -> int:
         print(f"[watchdog {time.strftime('%H:%M:%S')}] {message}", flush=True)
 
     paths = ViewPaths(args.view_dir)
-    # Blocks until the launcher releases the lock, which the kernel does when it dies.
+    # Blocks until the supervisor releases the lock, which the kernel does when it dies.
     lock = try_lock(paths, blocking=True)
     try:
-        # Only reap a view still owned by the launcher watched: otherwise it cleaned up itself, or a
-        # newer launcher has reclaimed the view and already finished with it.
-        watched = (args.launcher_pid, args.launcher_start)
+        # Only reap a view still owned by the supervisor watched: otherwise it cleaned up itself, or a
+        # newer supervisor has reclaimed the view and already finished with it.
+        watched = (args.supervisor_pid, args.supervisor_start)
         if not os.path.isdir(paths.view_dir) or read_pid_file(paths.owner_pid_file) != watched:
             return 0
-        log(f"launcher {args.launcher_pid} is gone with the view still owned; reaping")
+        log(f"supervisor {args.supervisor_pid} is gone with the view still owned; reaping")
         reap_view(paths, log, keep_state=args.keep_state)
         log("done")
     finally:
