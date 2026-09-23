@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package io.github.lyh970817.nfbiofuse
+package nextflow.biofuse
 
 import groovy.transform.CompileStatic
 import nextflow.plugin.BasePlugin

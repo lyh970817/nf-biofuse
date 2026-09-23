@@ -1,4 +1,4 @@
-package io.github.lyh970817.nfbiofuse
+package nextflow.biofuse
 
 import java.nio.file.Files
 import java.nio.file.Path

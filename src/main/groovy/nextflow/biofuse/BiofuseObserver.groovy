@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package io.github.lyh970817.nfbiofuse
+package nextflow.biofuse
 
 import java.nio.file.Path
 import java.nio.file.Paths
@@ -76,9 +76,8 @@ class BiofuseObserver implements TraceObserverV2 {
         catch( Exception e ) {
             supervisor?.stop()
             // Nextflow logs anything else an observer throws at debug level and carries on; only an
-            // AbortRunException ends the run, and Nextflow prints nothing for it, so log the reason here.
+            // AbortRunException ends the run, and Nextflow reports its message as the run's error.
             final message = e instanceof AbortOperationException ? e.message : "nf-biofuse: ${e}".toString()
-            log.error(message)
             throw new AbortRunException(message, e)
         }
     }

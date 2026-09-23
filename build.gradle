@@ -10,10 +10,10 @@ nextflowPlugin {
     nextflowVersion = '25.10.0'
 
     provider = 'lyh970817'
-    className = 'io.github.lyh970817.nfbiofuse.BiofusePlugin'
+    className = 'nextflow.biofuse.BiofusePlugin'
     extensionPoints = [
-        'io.github.lyh970817.nfbiofuse.BiofuseConfig',
-        'io.github.lyh970817.nfbiofuse.BiofuseObserverFactory'
+        'nextflow.biofuse.BiofuseConfig',
+        'nextflow.biofuse.BiofuseObserverFactory'
     ]
 
 }
