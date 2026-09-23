@@ -5,13 +5,15 @@ plugins {
 version = '0.1.0'
 
 nextflowPlugin {
+    // The minimum Nextflow version the plugin supports, and the version it compiles against. The
+    // TraceObserverV2 and ConfigScope extension points it uses exist from 25.10 on.
     nextflowVersion = '25.10.0'
 
     provider = 'lyh970817'
-    className = 'lyh970817.plugin.BiofusePlugin'
+    className = 'io.github.lyh970817.nfbiofuse.BiofusePlugin'
     extensionPoints = [
-        'lyh970817.plugin.BiofuseExtension',
-        'lyh970817.plugin.BiofuseFactory'
+        'io.github.lyh970817.nfbiofuse.BiofuseConfig',
+        'io.github.lyh970817.nfbiofuse.BiofuseObserverFactory'
     ]
 
 }
