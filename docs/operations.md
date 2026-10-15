@@ -198,14 +198,14 @@ in the preimage and nothing else is:
 
 | Preimage field | Content |
 |---|---|
-| `schema` | `nf-core/gwas/biofuse-view-identity/1` |
+| `schema` | `nf-biofuse/view-identity/1` |
 | `backend` | `{"family": "biofuse", "view": "mount-plink"}` |
 | `source` | `kind` `vcz`, the store's `vcf_zarr_version` and writer (its `source` attribute), and `revision` `{mode, value}` |
 | `runtime` | the `biofuse` and `vcztools` versions, which decide the encoded bytes |
 | `projection` | `max_alleles` (always `2`), every selection option as given (`null` when absent), `samples_file_sha256`, `force_samples`, and `contigs` `{policy, excluded}` |
 
-The schema string is the one the nf-core/gwas launcher used, kept so that a view keeps the identity the launcher
-declared for it; the golden identity in the supervisor's tests is the launcher's.
+The schema string versions the preimage layout; changing it moves every identity, and the golden identity in the
+supervisor's tests pins it.
 
 The store revision has two modes. By default it is `sha256`: a digest over every file in the store, visited in
 sorted relative-path order, each contributing its relative path, size and content digest, so the value depends

@@ -53,7 +53,7 @@ def test_preimage_shape_and_pinned_projection():
         projection=identity.build_projection(samples="S1,S2", contig_policy="autosomes", excluded_contigs=("X",)),
     )
     assert preimage == {
-        "schema": "nf-core/gwas/biofuse-view-identity/1",
+        "schema": "nf-biofuse/view-identity/1",
         "backend": {"family": "biofuse", "view": "mount-plink"},
         "source": {
             "kind": "vcz",
@@ -89,11 +89,11 @@ def test_golden_identity_pins_the_canonical_form():
         '"force_samples":false,"include":null,"max_alleles":2,"min_alleles":null,"regions":null,'
         '"samples":null,"samples_file_sha256":null,"targets":null,"types":null},'
         '"runtime":{"biofuse":"0.1.0","vcztools":"0.2.0"},'
-        '"schema":"nf-core/gwas/biofuse-view-identity/1",'
+        '"schema":"nf-biofuse/view-identity/1",'
         '"source":{"kind":"vcz","revision":{"mode":"sha256","value":"' + "ab" * 32 + '"},'
         '"vcf_zarr_version":"0.5","writer":"bio2zarr-0.2.1"}}'
     ).encode("utf-8")
-    assert identity.view_id(preimage) == "biofuse:635ddb2c04ba432a3077eb9a3b6719815331b3865841002bac98ec2a031d733f"
+    assert identity.view_id(preimage) == "biofuse:80cae2c06de247e3a7a032f7d257c8ab756c4d52854075a2bf1fbf8d2446e648"
 
 
 def test_invalid_modes_are_refused():

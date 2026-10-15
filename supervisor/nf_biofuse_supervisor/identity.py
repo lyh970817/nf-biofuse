@@ -11,7 +11,7 @@ how fast, where or under what name they are served is not.
 
 The canonical form is JSON with keys sorted, no whitespace and UTF-8 text unescaped. The preimage is:
 
-    schema      ``nf-core/gwas/biofuse-view-identity/1``
+    schema      ``nf-biofuse/view-identity/1``
     backend     ``{family: biofuse, view: mount-plink}``
     source      ``{kind: vcz, vcf_zarr_version, writer, revision: {mode: sha256 | declared, value}}``
     runtime     ``{biofuse, vcztools}`` -- the encoder versions, which decide the bytes
@@ -33,9 +33,8 @@ from __future__ import annotations
 import hashlib
 import json
 
-# The preimage layout version. Carried over verbatim from the nf-core/gwas launcher this supervisor was
-# ported from, so a view keeps the identity the launcher declared for it; changing the string moves every id.
-SCHEMA = "nf-core/gwas/biofuse-view-identity/1"
+# The preimage layout version; changing the string moves every id.
+SCHEMA = "nf-biofuse/view-identity/1"
 NAMESPACE = "biofuse"
 BACKEND = {"family": "biofuse", "view": "mount-plink"}
 SOURCE_KIND = "vcz"
