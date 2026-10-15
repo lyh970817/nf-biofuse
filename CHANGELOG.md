@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.0 (2026-10-15)
 
 First version. The supervisor is ported from the nf-core/gwas host-side BioFuse launcher
 (`launcher/biofuse` at lyh970817/gwas commit `fa44e58`); the import commit keeps its files verbatim, so the
