@@ -170,7 +170,7 @@ with `stateRoot = env('TMPDIR')` (node-local storage) in the `biofuse` scope. Th
 | `stateRoot` | `$XDG_RUNTIME_DIR`, `$TMPDIR` or `/tmp` | Where the mountpoint and view state live; must be visible to the task containers. |
 | `recordDir` | launch directory | Where `<basename>.biofuse_view.json` is written. |
 | `autosomesOnly`, `minAlleles`, `regions`, `targets`, `samples`, `samplesFile`, `forceSamples`, `include`, `exclude`, `types`, `excludeTypes` | unset | `vcztools view-plink` selection; enters the identity. |
-| `sourceRevision` | content digest | Declared store revision for an externally versioned store. |
+| `sourceRevision` | content digest | Declared store revision for an externally versioned store. The default digest reads the whole store at every launch, so set this for large stores. |
 | `readaheadBufferSize`, `readaheadWorkers`, `logLevel` | BioFuse defaults | How the view is served; not in the identity. |
 | `readinessTimeout` | `120s` | How long the trio may take to become readable. |
 | `keepState`, `verbose` | `false` | Keep the view's state directory and logs; log more. |

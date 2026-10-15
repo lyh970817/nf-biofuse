@@ -8,19 +8,12 @@ The repository is otherwise ready: `make assemble` builds `build/distributions/n
 with the generated `spec.json` for the `biofuse` config scope), and `README.md` has the four sections the registry
 requires: Summary, Get Started, Examples and License.
 
-## 0. Decisions to take first
+## 0. Decisions (taken 2026-10-15)
 
-- [ ] **Licence.** The repository uses Apache-2.0, the plugin template's default (`LICENSE`, SPDX headers,
-      `supervisor/pyproject.toml`). The supervisor is ported from nf-core/gwas code released under MIT. Keep
-      Apache-2.0, or relicense to MIT to match nf-core; the registry only requires an OSI licence.
-- [ ] **Provider and repository location.** `build.gradle` sets `provider = 'lyh970817'`, and the README's clone
-      URL is `https://github.com/lyh970817/nf-biofuse`. The provider must equal the one given when claiming the
-      name. If the plugin should live under an organisation, change both before anything is published.
-- [ ] **Identity schema string.** The view identity preimage keeps the launcher's schema string
-      `nf-core/gwas/biofuse-view-identity/1`, so a store keeps the identity the launcher declared for it. Renaming it
-      (for example to `nf-biofuse/view-identity/1`) moves every identity; it is cheap now and a breaking change
-      after release. If renamed, update `supervisor/nf_biofuse_supervisor/identity.py`, the golden test in
-      `supervisor/tests/test_identity.py` and `docs/operations.md`.
+- [x] **Licence:** Apache-2.0.
+- [x] **Provider and repository location:** `provider = 'lyh970817'`, repository `lyh970817/nf-biofuse`. The
+      provider must equal the one given when claiming the name.
+- [x] **Identity schema string:** renamed to `nf-biofuse/view-identity/1` before the first release.
 
 ## 1. Verify on the release commit
 
